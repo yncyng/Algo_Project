@@ -1,0 +1,5 @@
+node_modules/
+*.csv
+temp_chunks/
+radix_buckets/
+.env
