@@ -2,7 +2,7 @@ const fs = require('fs');
 const csv = require('csv-parser');
 const path = require('path');
 
-const INPUT_FILE = path.join(__dirname, 'network_logs_5GB.csv');
+const INPUT_FILE = path.join(__dirname, 'tc03_99percent_dupes_5GB.csv');
 const TEMP_DIR = path.join(__dirname, 'temp_chunks');
 
 // Ensure the temp directory exists
