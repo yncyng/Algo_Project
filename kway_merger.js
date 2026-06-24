@@ -31,7 +31,13 @@ async function mergeChunks() {
     console.log('Starting Phase 2: K-Way Merge (OPTIMIZED)...');
     const startTime = Date.now();
 
-    const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith('chunk_') && f.endsWith('.csv'));
+    const files = fs.readdirSync(TEMP_DIR)
+        .filter(f => f.startsWith('chunk_') && f.endsWith('.csv'))
+        .sort((a, b) => {
+            const numA = parseInt(a.match(/\d+/)[0], 10);
+            const numB = parseInt(b.match(/\d+/)[0], 10);
+            return numA - numB;
+        });
     console.log(`Found ${files.length} chunks to merge.`);
 
     // OPTIMIZATION 1: Add 'currentTimestamp' to the state object
@@ -46,13 +52,22 @@ async function mergeChunks() {
 
     const outStream = fs.createWriteStream(OUTPUT_FILE);
     // Writing header separately
-    await new Promise(resolve => outStream.write("Timestamp,Source IP,Destination IP,Protocol,Packet Size\n", resolve));
+    await new Promise(resolve => outStream.write("Timestamp,Source IP,Destination IP,Protocol,Packet Size,OriginalLineNumber\n", resolve));
 
 
     console.log('Loading the first row of each chunk and caching timestamps...');
     let activeStreams = 0;
     for (const stream of streams) {
-        const result = await stream.iterator.next();
+        let result;
+        try {
+            result = await stream.iterator.next();
+        } catch (err) {
+            if (err.code === 'ERR_USE_AFTER_CLOSE') {
+                result = { done: true };
+            } else {
+                throw err;
+            }
+        }
         if (!result.done && result.value) { // Check for empty lines at the end of files
             stream.currentLine = result.value;
             stream.currentTimestamp = getTimestamp(stream.currentLine); // Cache it once
@@ -92,7 +107,16 @@ async function mergeChunks() {
         await writeAndDrain(outStream, oldestStream.currentLine + '\n');
         rowsMerged++;
 
-        const result = await oldestStream.iterator.next();
+        let result;
+        try {
+            result = await oldestStream.iterator.next();
+        } catch (err) {
+            if (err.code === 'ERR_USE_AFTER_CLOSE') {
+                result = { done: true };
+            } else {
+                throw err;
+            }
+        }
         if (!result.done && result.value) {
             oldestStream.currentLine = result.value;
             const newTimestamp = getTimestamp(result.value);

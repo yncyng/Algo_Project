@@ -28,9 +28,9 @@ function writeChunkToFile(chunkData, chunkId) {
     // Sort chronologically before writing
     chunkData.sort((a, b) => new Date(a.Timestamp) - new Date(b.Timestamp));
     
-    // Format back to CSV string
+    // Format back to CSV string (with OriginalLineNumber as 6th column)
     const csvContent = chunkData.map(row => 
-        `${row.Timestamp},${row['Source IP']},${row['Destination IP']},${row.Protocol},${row['Packet Size']}`
+        `${row.Timestamp},${row['Source IP']},${row['Destination IP']},${row.Protocol},${row['Packet Size']},${row.OriginalLineNumber}`
     ).join('\n') + '\n';
     
     fs.writeFileSync(filePath, csvContent);
@@ -39,6 +39,7 @@ function writeChunkToFile(chunkData, chunkId) {
 
 readStream.on('data', (row) => {
     rowCount++;
+    row.OriginalLineNumber = rowCount;
     currentChunk.push(row);
     
     if (currentChunk.length >= CHUNK_LIMIT) {
