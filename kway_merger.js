@@ -3,19 +3,41 @@ const path = require('path');
 const readline = require('readline');
 
 const TEMP_DIR = path.join(__dirname, 'temp_chunks');
-const OUTPUT_FILE = path.join(__dirname, 'network_logs_5GB_SORTED.csv');
+const OUTPUT_FILE = path.join(__dirname, 'tc03_99percent_dupes_5GB_SORTED.csv');
 
 // Super fast helper to grab just the timestamp string from the CSV line
 const getTimestamp = (csvLine) => {
+    // Added a check for empty or invalid lines
+    if (!csvLine) return null;
     const tsString = csvLine.substring(0, csvLine.indexOf(','));
+    if (!tsString) return null;
     return new Date(tsString).getTime();
 };
+
+// Helper function to handle backpressure when writing to the output stream
+function writeAndDrain(stream, data) {
+    return new Promise((resolve) => {
+        if (!stream.write(data)) {
+            stream.once('drain', resolve);
+        } else {
+            // Using process.nextTick to avoid deep call stacks and allow other I/O to happen.
+            process.nextTick(resolve);
+        }
+    });
+}
+
 
 async function mergeChunks() {
     console.log('Starting Phase 2: K-Way Merge (OPTIMIZED)...');
     const startTime = Date.now();
 
-    const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith('chunk_') && f.endsWith('.csv'));
+    const files = fs.readdirSync(TEMP_DIR)
+        .filter(f => f.startsWith('chunk_') && f.endsWith('.csv'))
+        .sort((a, b) => {
+            const numA = parseInt(a.match(/\d+/)[0], 10);
+            const numB = parseInt(b.match(/\d+/)[0], 10);
+            return numA - numB;
+        });
     console.log(`Found ${files.length} chunks to merge.`);
 
     // OPTIMIZATION 1: Add 'currentTimestamp' to the state object
@@ -29,16 +51,31 @@ async function mergeChunks() {
     });
 
     const outStream = fs.createWriteStream(OUTPUT_FILE);
-    outStream.write("Timestamp,Source IP,Destination IP,Protocol,Packet Size\n");
+    // Writing header separately
+    await new Promise(resolve => outStream.write("Timestamp,Source IP,Destination IP,Protocol,Packet Size,OriginalLineNumber\n", resolve));
+
 
     console.log('Loading the first row of each chunk and caching timestamps...');
     let activeStreams = 0;
     for (const stream of streams) {
-        const result = await stream.iterator.next();
-        if (!result.done) {
+        let result;
+        try {
+            result = await stream.iterator.next();
+        } catch (err) {
+            if (err.code === 'ERR_USE_AFTER_CLOSE') {
+                result = { done: true };
+            } else {
+                throw err;
+            }
+        }
+        if (!result.done && result.value) { // Check for empty lines at the end of files
             stream.currentLine = result.value;
             stream.currentTimestamp = getTimestamp(stream.currentLine); // Cache it once
-            activeStreams++;
+            if (stream.currentTimestamp === null) { // Handle potentially invalid first lines
+                stream.isDone = true;
+            } else {
+                activeStreams++;
+            }
         } else {
             stream.isDone = true;
         }
@@ -52,7 +89,7 @@ async function mergeChunks() {
         let oldestStream = null;
         let oldestTime = Infinity;
 
-        // Loop 184 times per row, but NO date parsing! Just raw number comparison.
+        // Loop through active streams to find the one with the oldest timestamp
         for (const stream of streams) {
             if (!stream.isDone && stream.currentTimestamp < oldestTime) {
                 oldestTime = stream.currentTimestamp;
@@ -60,14 +97,35 @@ async function mergeChunks() {
             }
         }
 
-        outStream.write(oldestStream.currentLine + '\n');
+        if (oldestStream === null) {
+            // This can happen if remaining streams have invalid data
+            console.log('No oldest stream found, breaking loop.');
+            break;
+        }
+
+        // Write the line and handle backpressure
+        await writeAndDrain(outStream, oldestStream.currentLine + '\n');
         rowsMerged++;
 
-        const result = await oldestStream.iterator.next();
-        if (!result.done) {
+        let result;
+        try {
+            result = await oldestStream.iterator.next();
+        } catch (err) {
+            if (err.code === 'ERR_USE_AFTER_CLOSE') {
+                result = { done: true };
+            } else {
+                throw err;
+            }
+        }
+        if (!result.done && result.value) {
             oldestStream.currentLine = result.value;
-            // OPTIMIZATION 2: Update cache ONLY for the winning stream
-            oldestStream.currentTimestamp = getTimestamp(result.value); 
+            const newTimestamp = getTimestamp(result.value);
+            if (newTimestamp === null) { // Handle invalid lines mid-file
+                oldestStream.isDone = true;
+                activeStreams--;
+            } else {
+                oldestStream.currentTimestamp = newTimestamp;
+            }
         } else {
             oldestStream.isDone = true;
             activeStreams--;
@@ -78,7 +136,7 @@ async function mergeChunks() {
         }
     }
 
-    outStream.end();
+    await new Promise(resolve => outStream.end(resolve));
     const timeTaken = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log('\n--- K-WAY MERGE COMPLETE ---');
     console.log(`Total Rows Merged: ${rowsMerged.toLocaleString()}`);
